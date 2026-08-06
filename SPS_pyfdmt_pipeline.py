@@ -21,6 +21,8 @@ from pyfdmt import transform
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-f", "--filename", help="Input filterbank filename")
+parser.add_argument("-lodm", "--low_dm", help="Smallest DM to search.")
+parser.add_argument("-hidm", "--high_dm", help="Largest DM to search.")
 parser.add_argument("-mw", "--max_width", help="Maximum width (s)")
 parser.add_argument("-th", "--threshold", help="Detection threshold")
 parser.add_argument("-mpt", "--min_points", help="min_points to use in the hdbscan clustering, clusters smaller than this would be recorded as noise")
@@ -30,16 +32,49 @@ max_width = float(args.max_width)
 filename = str(args.filename)
 threshold = float(args.threshold)
 min_points = int(args.min_points)
+lodm = float(args.low_dm)
+hidm = float(args.high_dm)
 
 ##########    Header information    #################
+class headinfo:
+	def __init__(self, filename):
+		fil1 = sigpyproc.readers.FilReader(filename)
+		self.nsamp = fil1.header.nsamples
+		self.tsamp = fil1.header.tsamp        ## seconds
+		self.fmax = fil1.header.fmax/1000.0    ## GHz
+		self.fmin = fil1.header.fmin/1000.0    ## GHz
+		self.nchan = fil1.header.nchans
+		self.basename = fil1.header.basename
 
-fil=sigpyproc.readers.FilReader(filename)
-nsamp = fil.header.nsamples
-tsamp1 = fil.header.tsamp        ## seconds
-fmax = fil.header.fmax/1000.0    ## GHz
-fmin = fil.header.fmin/1000.0    ## GHz
-nchan = fil.header.nchans
-basename = fil.header.basename
+def generate_dmplan(header, dmlo, dmhi):
+	dm_plan = []
+	dm_const = 1/241.0
+	nu1 = header.fmin
+	nu2 = header.fmax
+	del_t = header.tsamp
+	chan_width = (nu2 - nu1)/header.nchan
+	min_delay = 2*dm_const*lodm*chan_width/(nu1)**3.0
+	print(f" Minimum delay {min_delay} for dm {lodm}")
+	down_factor = np.ceil(min_delay/del_t)
+	del_t = del_t*down_factor
+	max_delay = 2*dm_const*hidm*chan_width/(nu1)**3.0
+	if(max_delay <= del_t):
+		dm_plan.append([lodm, hidm])
+		return dm_plan
+	else:
+		dm1 = lodm
+		while(del_t < max_delay):
+			dm2 = (del_t)/(2*dm_const*chan_width/(nu1)**3.0)
+			if(dm2 >= hidm):
+				dm_plan.append([dm1, hidm])
+				break;
+			down_factor = down_factor*2
+			del_t = del_t*2
+			dm_plan.append([dm1, dm2])
+			dm1 = dm2
+		dm_plan.append([dm1, hidm])
+		return dm_plan
+	
 
 ########## lists to store the detections   ############
 
@@ -49,6 +84,12 @@ cand_Width = []
 cand_SNR = []
 
 
+header = headinfo(filename)
+tsamp1 = header.tsamp
+nsamp = header.nsamp
+nchan = header.nchan
+fmin = header.fmin
+fmax = header.fmax
 ####   Filter widths   #########################
 
 filters = []
@@ -60,9 +101,11 @@ filters1 = np.array(filters)
 
 #########   DM plan without dm step, the DM step is set by pyfdmt algortihm based on the frequency range and time resolution   ################
 
-dm_plan = [[0.0,100],[100.0,300.0],[300.0,700.0],[700.0,1500.0],[1500.0,3100.0]]
-#    dm_plan = [[700.0,1300.0]]
 
+dm_plan = generate_dmplan(header, lodm, hidm)
+#dm_plan = [[0.0,100],[100.0,300.0],[300.0,700.0],[700.0,1500.0],[1500.0,3100.0]]
+#    dm_plan = [[700.0,1300.0]]
+print(dm_plan)
 
 #########    Filter block reading     ##################
 
@@ -79,9 +122,9 @@ iterations = int(np.floor(float(nsamp - overlap_samps)/float(buffer_size - overl
 
 
 print("number of interations : "+str(iterations))
-
+print(f"Low and frequency {fmin} {fmax}")
 start = 0
-
+fil = sigpyproc.readers.FilReader(filename)
 #####################    Going through block iterations    ########################
 for itr in range(iterations):
     filters = filters1
