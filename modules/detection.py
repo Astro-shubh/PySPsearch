@@ -3,7 +3,7 @@ import scipy
 import struct
 import bottleneck as bn
 import matplotlib.pyplot as plt
-
+from multiprocessing import Pool
 
 def prune_related1(hibins, hivals, downfact):              #### This function has been taken from the PRESTO's single_pulse_search.py
     # Remove candidates that are close to other candidates
@@ -47,13 +47,14 @@ def detection(TimeSeries, BoxcarWidths, RmedWidth, Threshold, TimeSamp, TrialDM)
     TimeSeries = TimeSeries - bn.move.move_median(TimeSeries, window=RmedWidth, min_count=1)
     TimeSeries = TimeSeries - np.mean(TimeSeries)
     TimeSeries = TimeSeries/np.std(TimeSeries)
-
     for width in BoxcarWidths:
         if(width == 1):
             conv_result = TimeSeries
             centering = 0
         else:
+#            kernel = np.ones(2*int(width/2.0)+1)
             conv_result = bn.move.move_sum(TimeSeries, window=width, min_count=1)
+#            conv_result = np.convolve(TimeSeries, kernel, mode='same')
             centering = int(width/2.0)
         valid_start = width-1
         valid_end = len(conv_result)-width
@@ -69,10 +70,5 @@ def detection(TimeSeries, BoxcarWidths, RmedWidth, Threshold, TimeSamp, TrialDM)
             cand_Width.append(width*TimeSamp)
             cand_SNR.append(detection_snr[i])
 
-    return np.array(cand_Time), np.array(cand_DM), np.array(cand_Width), np.array(cand_SNR)
-            
-
-            
-
-
+    return np.array(cand_Time), np.array(cand_DM), np.array(cand_Width), np.array(cand_SNR) 
 
