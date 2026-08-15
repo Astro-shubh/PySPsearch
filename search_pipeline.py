@@ -1,21 +1,22 @@
 import argparse
-import numpy as np
-#import multiprocessing as mp
-import os
-import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import glob
-import pandas as pd
-from concurrent.futures import wait
-from concurrent.futures import ProcessPoolExecutor as Pool
-import modules.search_filterbank
+import matplotlib.pyplot as plt
 import modules.clustering_classes
 import modules.plot_files
-import matplotlib.pyplot as plt
+import modules.search_filterbank
+import modules.parallel_clustering
+import modules.write_products
+import numpy as np
+import os
+import pandas as pd
+import sys
+import time
 
 ###########    Argument Parsing     #################
 
 parser = argparse.ArgumentParser(
-    description="Single-pulse search and clustering pipeline"
+    description="Single-pulse search and parallel block-wise clustering pipeline"
 )
 parser.add_argument("-f", "--filename", help="Input filterbank filename")
 parser.add_argument("-lodm", "--low_dm", help="Smallest DM to search.")
@@ -55,6 +56,18 @@ parser.add_argument(
     help="Epsilon parameter for DBSCAN max distance (s)",
 )
 
+parser.add_argument(
+    "--write-clusters",
+    action="store_true",
+    help="Enable writing individual clusters to disk",
+)
+parser.add_argument(
+    "--output-directory",
+    type=str,
+    default="./",
+    help="Directory path to save cluster files",
+)
+
 args = parser.parse_args()
 max_width = float(args.max_width)
 filename = str(args.filename)
@@ -65,44 +78,57 @@ cluster_method = args.cluster_method.lower()
 
 ### Search the filterbank in provided dm range ####
 
-T, D, W, S = modules.search_filterbank.search_fil(filename, lodm, hidm, max_width, threshold)
+print("Starting search...")
+search_start = time.perf_counter()
 
-### Plot the results  ###
+T, D, W, S = modules.search_filterbank.search_fil(
+    filename, lodm, hidm, max_width, threshold
+)
+
+search_duration = time.perf_counter() - search_start
+print(f"-> Search completed in {search_duration:.2f} seconds.")
 
 print(f"number of detection is {len(T)}")
 
-### Convert DM to delay  #### 
-
-header = modules.search_filterbank.headinfo(filename)
-DM_delay = modules.search_filterbank.dm_to_delay(D, header.fmin, header.fmax)
 
 if len(T) > 0:
   ### Convert DM to delay ####
   header = modules.search_filterbank.headinfo(filename)
   DM_delay = modules.search_filterbank.dm_to_delay(D, header.fmin, header.fmax)
 
-  ### Do Clustering Dynamically Using Consistent Class Interface ####
-  print(f"Running clustering using method: {cluster_method}")
+  ### Pre-configure the Clustering Object Upfront ####
+  print(
+      f"Configuring clustering instance for method: {cluster_method}"
+  )
 
-  clusterer_map = {
-      "fofw": lambda: modules.clustering_classes.fofW(T, DM_delay, S, W),
-      "fof": lambda: modules.clustering_classes.fof(
-          T, DM_delay, S, W, linking_length=args.fof_link
-      ),
-      "dbscan": lambda: modules.clustering_classes.DbscanClustering(
-          T, DM_delay, S, W, eps=args.eps, min_samples=args.min_points
-      ),
-      "hdbscan": lambda: modules.clustering_classes.HdbscanClustering(
-          T, DM_delay, S, W, min_cluster_size=args.min_points
-      ),
-  }
+  if cluster_method == "fofw":
+    configured_clusterer = modules.clustering_classes.fofW(
+        width_fraction=1.0, min_length=0.01, max_length=0.5
+    )
+  elif cluster_method == "fof":
+    configured_clusterer = modules.clustering_classes.fof(
+        linking_length=args.fof_link
+    )
+  elif cluster_method == "dbscan":
+    configured_clusterer = modules.clustering_classes.DbscanClustering(
+        eps=args.eps, min_samples=args.min_points
+    )
+  elif cluster_method == "hdbscan":
+    configured_clusterer = modules.clustering_classes.HdbscanClustering(
+        min_cluster_size=args.min_points
+    )
 
-  clusterer = clusterer_map[cluster_method]()
-  clusterer.do_clustering()
-  clusters = clusterer.final_clusters()
-  plotting = modules.plot_files.PlotAllClustersDMTime(T, D, W, S, clusters)
-  plotting.plot_and_save("./", "DM_Time_clusters", show = True)
+  print(f"Running parallel clustering using method: {cluster_method}")
+  cluster_start = time.perf_counter()
 
+  ### Start blockwise parallel clustering   #####
+  clusters = modules.parallel_clustering.blockwise_clustering(configured_clusterer, T, DM_delay, S, W, chunk_size=100000)
+  cluster_duration = time.perf_counter() - cluster_start
+  print(f"-> Clustering completed in {cluster_duration:.2f} seconds.")
   print(f"Number of clusters found: {len(clusters)}")
+
+  ## If required, write the clusters to directory
+  if args.write_clusters:
+    modules.write_products.write_clusters(T, D, W, S, clusters, args.output_directory, header.basename)
 else:
   print("No detections found to cluster.")

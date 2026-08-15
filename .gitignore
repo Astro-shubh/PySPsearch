@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.png
+DM_Time_clusters_all_clusters_DM_Time.png
+clusters/

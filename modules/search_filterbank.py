@@ -53,14 +53,15 @@ def generate_dmplan(header, lodm, hidm):
       if dm2 >= hidm:
         dm_plan.append([dm1, hidm])
         down_plan.append(int(down_factor))
+        down_factor = down_factor * 2
         break
-      down_factor = down_factor * 2
-      del_t = del_t * 2
       dm_plan.append([dm1, dm2])
       down_plan.append(int(down_factor))
+      down_factor = down_factor * 2
+      del_t = del_t * 2
       dm1 = dm2
     dm_plan.append([dm1, hidm])
-    down_plan.append(int(down_factor * 2))
+    down_plan.append(int(down_factor))
     return dm_plan, down_plan
 
 
@@ -75,10 +76,10 @@ def get_filters(max_width, tsamp):
 
 # Worker wrapper function to process a single DM time series independently
 def process_single_dm(args):
-  Tseries, filters, rmed_width, threshold, tsamp, dm_val = args
+  Tseries, filters, rmed_width, threshold, tsamp, dm_val, rms = args
   # Call detection serially for this specific DM (using the fast bottleneck code)
   return modules.detection.detection(
-      Tseries, filters, rmed_width, threshold, tsamp, dm_val
+      Tseries, filters, rmed_width, threshold, tsamp, dm_val, rms
   )
 
 
@@ -112,7 +113,7 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
   fil = sigpyproc.readers.FilReader(filename)
 
   # Create a persistent process pool executor restricted to max 8 cores
-  with ProcessPoolExecutor(max_workers=8) as executor:
+  with ProcessPoolExecutor(max_workers=16) as executor:
     for itr in range(iterations):
       current_detections = len(cand_Time)
       if (nsamp - start) < buffer_size:
@@ -140,15 +141,21 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
         print(
             f"Done with dedispersion. Total number of DMs: {len(dm_time.dms)}"
         )
-
         DT_data = dm_time.data
         dm_list = dm_time.dms
+        is_last_iteration = itr == (iterations - 1)
+        if is_last_iteration:
+            valid_bins = DT_data.shape[1]
+        else:
+            valid_bins = int(chunk_samples / down_factor)
+        DT_data = DT_data[:, :valid_bins]
+        rms = np.std(DT_data[0])
         rmed_width = 2.0 * max_width / tsamp
         rmed_width = 2 * int(rmed_width / 2.0) + 1
 
         # Prepare tasks for all DMs in this block
         tasks = [
-            (DT_data[dm_num], filters, rmed_width, threshold, tsamp, dm_list[dm_num])
+            (DT_data[dm_num], filters, rmed_width, threshold, tsamp, dm_list[dm_num], rms)
             for dm_num in range(len(dm_list))
         ]
 
