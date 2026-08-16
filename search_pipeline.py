@@ -122,7 +122,7 @@ if len(T) > 0:
   cluster_start = time.perf_counter()
 
   ### Start blockwise parallel clustering   #####
-  clusters = modules.parallel_clustering.blockwise_clustering(configured_clusterer, T, DM_delay, S, W, chunk_size=100000)
+  clusters = modules.parallel_clustering.blockwise_clustering(configured_clusterer, T, DM_delay, S, W, chunk_size=1000000)
   cluster_duration = time.perf_counter() - cluster_start
   print(f"-> Clustering completed in {cluster_duration:.2f} seconds.")
   print(f"Number of clusters found: {len(clusters)}")

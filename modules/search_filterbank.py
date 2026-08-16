@@ -175,7 +175,7 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
           f"Found {len(cand_Time) - current_detections} detections in buffer"
           f" {itr}"
       )
-      if(itr >= 5):
-          break;
+#      if(itr >= 5):
+#          break;
 
   return cand_Time, cand_DM, cand_Width, cand_SNR
