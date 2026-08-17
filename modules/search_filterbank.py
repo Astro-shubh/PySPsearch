@@ -1,16 +1,15 @@
 from concurrent.futures import ProcessPoolExecutor
 import bottleneck as bn
-import glob
 import modules.detection
+import modules.parallel_clustering
+import modules.sifting_classes
 import numpy as np
-import os
 import pandas as pd
 from pyfdmt import transform
 import scipy.signal
 import sigpyproc.readers
 import sigpyproc.timeseries
-import sys
-import matplotlib.pyplot as plt
+import time
 
 
 def dm_to_delay(dm, fmin, fmax):
@@ -31,6 +30,8 @@ class headinfo:
 
 
 def generate_dmplan(header, lodm, hidm):
+  if(lodm <= 0.1):
+    lodm = 0.1
   dm_plan = []
   down_plan = []
   dm_const = 1 / 241.0
@@ -83,7 +84,7 @@ def process_single_dm(args):
   )
 
 
-def search_fil(filename, lodm, hidm, max_width, threshold):
+def search_fil(filename, lodm, hidm, max_width, threshold, configured_clusterer, out_dir, write_clusters):
   cand_Time = []
   cand_DM = []
   cand_Width = []
@@ -96,6 +97,7 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
   fmin = header.fmin
   fmax = header.fmax
 
+  print("Generating DM plan...")
   dm_plan, down_plan = generate_dmplan(header, lodm, hidm)
   print("DM ranges from DM plan: ", dm_plan)
   print("Downsampling for each DM range: ", down_plan)
@@ -109,26 +111,40 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
   iterations = int(np.floor(float(nsamp - overlap_samps) / float(chunk_samples)) + 1)
   print("number of iterations : " + str(iterations))
 
-  start = 0
+  start = 0     # Start sample for reading the filterbank
   fil = sigpyproc.readers.FilReader(filename)
 
   # Create a persistent process pool executor restricted to max 8 cores
-  with ProcessPoolExecutor(max_workers=16) as executor:
+  with ProcessPoolExecutor(max_workers=8) as executor:
     for itr in range(iterations):
-      current_detections = len(cand_Time)
+
+      # List to store the detections in current interattion
+      itr_Time = []
+      itr_DM = []
+      itr_SNR = []
+      itr_Width = []
+
+      #  If available number of samples is smaller than the buffer size
       if (nsamp - start) < buffer_size:
         buffer_size = nsamp - start
 
+      # read the chunk of buffer size
       new_buffer = fil.read_block(start, buffer_size)
       start_time = start * tsamp1
       print(f"Processing buffer number: {itr}")
+      detection_start = time.perf_counter()
 
+      # Go through each DM plan
       for plan_number in range(len(dm_plan)):
         print("working on DM range: " + str(dm_plan[plan_number]) + "\n")
+        # Get the downsampling for current DM range
         down_factor = down_plan[plan_number]
+        # Downsample the buffer to current downfactor
         using_buffer = new_buffer.downsample(1, down_factor)
+        # Compute filters for current downsampling
         filters = get_filters(max_width, using_buffer.header.tsamp)
 
+        # Compute the dedispersion trnasform
         tsamp = using_buffer.header.tsamp
         dm_time = transform(
             using_buffer.data,
@@ -141,15 +157,23 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
         print(
             f"Done with dedispersion. Total number of DMs: {len(dm_time.dms)}"
         )
+
+        # Get the dedispersed data and dm list
         DT_data = dm_time.data
         dm_list = dm_time.dms
         is_last_iteration = itr == (iterations - 1)
+
+        # Decide the valid time range in DT data (i.e. exclude the overlap part
         if is_last_iteration:
             valid_bins = DT_data.shape[1]
         else:
             valid_bins = int(chunk_samples / down_factor)
         DT_data = DT_data[:, :valid_bins]
+
+        # Cmpute the rms from lowest DM time series
         rms = np.std(DT_data[0])
+
+        # Compute the running median width based on max search width
         rmed_width = 2.0 * max_width / tsamp
         rmed_width = 2 * int(rmed_width / 2.0) + 1
 
@@ -162,20 +186,46 @@ def search_fil(filename, lodm, hidm, max_width, threshold):
         # Execute detection across the 8-core process pool for all DMs simultaneously
         results = list(executor.map(process_single_dm, tasks))
 
-        # Unpack results and append to master candidate lists
+        # write the candidates of the current DM range to the iteration results    
         for T, D, W, S in results:
-          for i in range(len(T)):
-            cand_Time.append(T[i] + start_time)
-            cand_DM.append(D[i])
-            cand_Width.append(W[i])
-            cand_SNR.append(S[i])
+          for ii in range(len(T)):
+            itr_Time.append(T[ii])
+            itr_DM.append(D[ii])
+            itr_Width.append(W[ii])
+            itr_SNR.append(S[ii])
 
+      detection_time = time.perf_counter() - detection_start
+      print(f"-> detection completed in {detection_time:.2f} seconds.")
+
+      #  Cluster the detections of current iteration
+      DM_delay = modules.search_filterbank.dm_to_delay(itr_DM, header.fmin, header.fmax)
+      print(f"Started clustering on {len(itr_Time)} detection in iteration {itr}")
+      clustering_start = time.perf_counter()
+      clusters = modules.parallel_clustering.blockwise_clustering(configured_clusterer, itr_Time, DM_delay, itr_SNR, itr_Width, chunk_size=1000000)
+      clustering_time = time.perf_counter() - clustering_start
+      print(f"-> clustering completed in {clustering_time:.2f} seconds.")
+
+      #write the clusters if asked
+      if(write_clusters):
+        modules.write_products.write_clusters(itr_Time, itr_DM, itr_Width, itr_SNR, clusters, out_dir, header.basename)
+
+      # Sift the clusters of the current itr
+      sifted_T, sifted_D, sifted_W, sifted_S = modules.sifting_classes.thresholding(itr_Time, itr_DM, itr_Width, itr_SNR, clusters, 1.0, 10)
+
+      # Store the sifted results of current itr to global candidate list
+      for jj in range(len(sifted_T)):
+        cand_Time.append(sifted_T[jj])
+        cand_DM.append(sifted_D[jj])
+        cand_Width.append(sifted_W[jj])
+        cand_SNR.append(sifted_S[jj])
+
+      # set the new start for reading the filterbank file for next iteration
       start = start + buffer_size - overlap_samps
       print(
-          f"Found {len(cand_Time) - current_detections} detections in buffer"
+          f"Found {len(itr_Time)} detections and {len(sifted_T)} candidate in buffer"
           f" {itr}"
       )
-#      if(itr >= 5):
+#      if(itr >= 2):
 #          break;
 
   return cand_Time, cand_DM, cand_Width, cand_SNR

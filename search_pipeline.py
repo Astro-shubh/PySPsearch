@@ -75,60 +75,37 @@ threshold = float(args.threshold)
 lodm = float(args.low_dm)
 hidm = float(args.high_dm)
 cluster_method = args.cluster_method.lower()
+out_dir = args.output_directory
 
 ### Search the filterbank in provided dm range ####
 
 print("Starting search...")
 search_start = time.perf_counter()
 
-T, D, W, S = modules.search_filterbank.search_fil(
-    filename, lodm, hidm, max_width, threshold
+print(
+    f"Configuring clustering instance for method: {cluster_method}"
 )
+
+if cluster_method == "fofw":
+  configured_clusterer = modules.clustering_classes.fofW(
+      width_fraction=1.0, min_length=0.01, max_length=0.5
+   )
+elif cluster_method == "fof":
+  configured_clusterer = modules.clustering_classes.fof(
+      linking_length=args.fof_link
+  )
+elif cluster_method == "dbscan":
+  configured_clusterer = modules.clustering_classes.DbscanClustering(
+      eps=args.eps, min_samples=args.min_points
+  )
+elif cluster_method == "hdbscan":
+  configured_clusterer = modules.clustering_classes.HdbscanClustering(
+      min_cluster_size=args.min_points
+  )
+
+T, D, W, S = modules.search_filterbank.search_fil(filename, lodm, hidm, max_width, threshold, configured_clusterer, out_dir, args.write_clusters)
 
 search_duration = time.perf_counter() - search_start
 print(f"-> Search completed in {search_duration:.2f} seconds.")
 
-print(f"number of detection is {len(T)}")
-
-
-if len(T) > 0:
-  ### Convert DM to delay ####
-  header = modules.search_filterbank.headinfo(filename)
-  DM_delay = modules.search_filterbank.dm_to_delay(D, header.fmin, header.fmax)
-
-  ### Pre-configure the Clustering Object Upfront ####
-  print(
-      f"Configuring clustering instance for method: {cluster_method}"
-  )
-
-  if cluster_method == "fofw":
-    configured_clusterer = modules.clustering_classes.fofW(
-        width_fraction=1.0, min_length=0.01, max_length=0.5
-    )
-  elif cluster_method == "fof":
-    configured_clusterer = modules.clustering_classes.fof(
-        linking_length=args.fof_link
-    )
-  elif cluster_method == "dbscan":
-    configured_clusterer = modules.clustering_classes.DbscanClustering(
-        eps=args.eps, min_samples=args.min_points
-    )
-  elif cluster_method == "hdbscan":
-    configured_clusterer = modules.clustering_classes.HdbscanClustering(
-        min_cluster_size=args.min_points
-    )
-
-  print(f"Running parallel clustering using method: {cluster_method}")
-  cluster_start = time.perf_counter()
-
-  ### Start blockwise parallel clustering   #####
-  clusters = modules.parallel_clustering.blockwise_clustering(configured_clusterer, T, DM_delay, S, W, chunk_size=1000000)
-  cluster_duration = time.perf_counter() - cluster_start
-  print(f"-> Clustering completed in {cluster_duration:.2f} seconds.")
-  print(f"Number of clusters found: {len(clusters)}")
-
-  ## If required, write the clusters to directory
-  if args.write_clusters:
-    modules.write_products.write_clusters(T, D, W, S, clusters, args.output_directory, header.basename)
-else:
-  print("No detections found to cluster.")
+print(f"number of pulses found is {len(T)}")
